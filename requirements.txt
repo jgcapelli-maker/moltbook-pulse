@@ -11,3 +11,4 @@ webdriver-manager
 lxml
 nltk
 vaderSentiment
+numpy
