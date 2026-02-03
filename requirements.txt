@@ -9,3 +9,5 @@ beautifulsoup4
 ccxt
 webdriver-manager
 lxml
+nltk
+vaderSentiment
