@@ -1,0 +1,12 @@
+﻿{
+  "lexicon": {
+    "moon": 4.0, "pump": 3.5, "gem": 3.0, "alpha": 3.0, "wagmi": 2.5,
+    "bullish": 2.5, "based": 2.0, "send it": 2.0, "green": 1.5,
+    "rug": -4.0, "scam": -4.0, "dump": -3.5, "rekt": -3.0, "ngmi": -3.0,
+    "dev sold": -3.5, "honeypot": -4.0, "crab": 0.0, "lag": -1.0
+  },
+  "logic_rules": {
+    "lag_definition": "Sentiment > 0.5 AND Price Change < 0.5%",
+    "panic_definition": "Sentiment < -0.5 AND Volume Spike > 50%"
+  }
+}
