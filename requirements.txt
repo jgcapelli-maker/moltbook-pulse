@@ -12,3 +12,4 @@ lxml
 nltk
 vaderSentiment
 numpy
+flask
