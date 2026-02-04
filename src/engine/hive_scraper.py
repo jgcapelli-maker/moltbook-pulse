@@ -7,98 +7,163 @@ from bs4 import BeautifulSoup
 import time
 import re
 from collections import Counter
+import logging
+
+# Configuração de Log limpo
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
 class HiveScraper:
     def __init__(self):
         self.url = "https://moltbook.com"
         
+        # STOPWORDS: Lista robusta para limpeza de ruído
+        # Removemos verbos, preposições e gírias genéricas que não indicam narrativa
+        self.STOPWORDS = set([
+            "the", "and", "is", "in", "it", "to", "of", "for", "on", "that", "this", "with", "are", 
+            "you", "was", "be", "at", "as", "have", "not", "but", "can", "will", "just", "if", "or", 
+            "what", "so", "me", "my", "all", "up", "out", "do", "get", "no", "we", "like", "when", 
+            "from", "has", "how", "go", "one", "they", "crypto", "market", "price", "chart", "pump", 
+            "dump", "buy", "sell", "holding", "bag", "moon", "bullish", "bearish", "gem", "coins", 
+            "token", "project", "community", "team", "good", "great", "best", "check", "guys", 
+            "today", "now", "time", "week", "year", "day", "hour", "minutes", "ago", "reply", 
+            "posted", "share", "report", "hide", "save", "comments", "submolts", "view", "more", 
+            "loading", "show", "read", "people", "think", "know", "see", "going", "make", "money",
+            "search", "notifications", "profile", "home", "explore", "messages"
+        ])
+
     def setup_driver(self):
+        """Configura o Chrome para ambiente Serverless (Low Memory/CPU)"""
         chrome_options = Options()
-        # Configurações anti-crash para ambiente Serverless (Render/Heroku)
-        chrome_options.add_argument("--headless") 
+        chrome_options.add_argument("--headless=new") # Modo headless moderno
         chrome_options.add_argument("--no-sandbox")
-        chrome_options.add_argument("--disable-dev-shm-usage")
+        chrome_options.add_argument("--disable-dev-shm-usage") # Usa /tmp em vez de /dev/shm
         chrome_options.add_argument("--disable-gpu")
-        chrome_options.add_argument("--remote-debugging-port=9222") # Ajuda a estabilizar
-        # User-agent genérico e seguro
-        chrome_options.add_argument("--user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36")
+        chrome_options.add_argument("--disable-extensions")
+        chrome_options.add_argument("--disable-infobars")
+        # Bloqueia imagens para economizar banda e RAM
+        chrome_options.add_argument("--blink-settings=imagesEnabled=false") 
+        chrome_options.add_argument("--remote-debugging-port=9222")
+        chrome_options.add_argument("--user-agent=Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
         
         return webdriver.Chrome(options=chrome_options)
 
+    def _generate_ngrams(self, text, n):
+        """Gera N-grams (sequências de N palavras) a partir de um texto."""
+        words = [w for w in re.findall(r'\b[a-zA-Z0-9$]+\b', text.lower()) if w not in self.STOPWORDS and len(w) > 2]
+        return [" ".join(words[i:i+n]) for i in range(len(words)-n+1)]
+
     def scan_hive(self):
-        driver = self.setup_driver()
-        print("   ⏳ Iniciando Mineração (Modo Seguro)...")
-        
+        driver = None
         try:
+            driver = self.setup_driver()
+            print("   ⏳ [NLP ENGINE] Iniciando Varredura Neural da Colmeia...")
+            
+            driver.set_page_load_timeout(30)
             driver.get(self.url)
             
-            # Espera genérica pelo BODY (mais seguro que esperar 'article')
+            # Wait inteligente pelo container principal
             WebDriverWait(driver, 20).until(
                 EC.presence_of_element_located((By.TAG_NAME, "body"))
             )
             
-            # --- FASE 1: SCROLL ---
-            for _ in range(5): 
+            # --- FASE 1: SMART SCROLL BUFFER ---
+            # Coleta dados progressivamente sem estourar memória
+            # Rola 6 vezes (aprox. 120-150 posts)
+            for i in range(6): 
                 driver.execute_script("window.scrollTo(0, document.body.scrollHeight);")
-                time.sleep(2) 
+                time.sleep(1.5 + (i * 0.2)) # Espera progressiva para simular humano e dar tempo ao AJAX
             
-            # --- FASE 2: COLETA ---
+            # --- FASE 2: EXTRAÇÃO E FILTRAGEM TEMPORAL ---
+            # Usamos BS4 porque é 10x mais rápido que Selenium para parsear texto
             soup = BeautifulSoup(driver.page_source, 'html.parser')
-            # Pega qualquer texto relevante
-            content_blocks = soup.find_all(['p', 'div', 'span', 'article'])
             
-            fresh_comments = []
-            discarded_count = 0
-            full_fresh_text = ""
+            # Seleciona blocos de texto genéricos (article, div de post, p)
+            content_blocks = soup.find_all(['p', 'div', 'span', 'article', 'h1', 'h2'])
             
-            # --- FASE 3: FILTRO (Time Gate) ---
+            fresh_sentences = []
+            discarded_old = 0
+            
+            # Regex Cirúrgico: Detecta dígitos + h/d/y (ex: "2h ago", "1d", "3 y ago")
+            time_filter_regex = re.compile(r'\b\d+\s*(h|d|y|hr|day|yr)s?\b', re.IGNORECASE)
+            
             for block in content_blocks:
                 text = block.get_text(" ", strip=True)
                 
-                # Descarta se tiver horas/dias/anos
-                is_old = re.search(r'\d+\s*[hdy]\s*ago', text, re.IGNORECASE)
+                # 1. Filtro Temporal
+                if time_filter_regex.search(text):
+                    discarded_old += 1
+                    continue
                 
-                if is_old:
-                    discarded_count += 1
-                    continue 
-                
-                if len(text) > 20 and text not in fresh_comments:
-                    clean_text = " ".join(text.split())
-                    fresh_comments.append(clean_text)
-                    full_fresh_text += " " + clean_text
+                # 2. Filtro de Qualidade Mínima
+                # Ignora textos muito curtos (bot spam) ou muito longos (copy-paste de artigo)
+                if 20 < len(text) < 500:
+                    fresh_sentences.append(text)
 
-            print(f"   ✅ Amostra FRESCA: {len(fresh_comments)} itens. (Desc: {discarded_count})")
+            print(f"   ✅ Buffer Processado: {len(fresh_sentences)} fragmentos recentes (Descartados: {discarded_old})")
 
-            # --- FASE 4: TICKERS ---
-            pattern = r'\$([a-zA-Z]{2,6})'
-            matches = re.findall(pattern, full_fresh_text)
-            ignored = ['USDT', 'USD', 'USDC', 'DAI', 'BUSD']
-            clean_matches = [m.upper() for m in matches if m.upper() not in ignored and len(m) > 1]
+            if not fresh_sentences:
+                return [], "Silêncio absoluto na rede recente.", {}
+
+            # --- FASE 3: DETECÇÃO DE NARRATIVAS (NLP N-GRAMS) ---
+            all_ngrams = []
             
-            counts = Counter(clean_matches)
+            for sentence in fresh_sentences:
+                # Prioridade 1: Tickers explícitos ($BTC, $AI)
+                tickers = re.findall(r'\$[A-Za-z]{2,6}', sentence.upper())
+                all_ngrams.extend(tickers * 3) # Peso triplo para tickers explícitos
+                
+                # Prioridade 2: Bigrams (Ex: "AI AGENTS", "RWA TOKEN") - Onde mora o valor
+                bigrams = self._generate_ngrams(sentence, 2)
+                all_ngrams.extend([b.upper() for b in bigrams])
+                
+                # Prioridade 3: Unigrams (Palavras-chave fortes isoladas)
+                unigrams = self._generate_ngrams(sentence, 1)
+                all_ngrams.extend([u.upper() for u in unigrams])
+
+            # Contagem de Frequência
+            counts = Counter(all_ngrams)
+            
+            # Remove falsos positivos (termos que aparecem só 1 vez são ruído)
+            counts = {k: v for k, v in counts.items() if v > 1}
             
             if not counts:
-                print("   ⚠️ Nenhum ticker detectado.")
-                return [], "Silêncio na rede recente", {}
+                # Fallback se tudo for ruído único
+                return [], "Dispersão de tópicos. Sem consenso.", {}
 
-            top_trends = counts.most_common(5)
-            winner_symbol = top_trends[0][0]
-            winner_count = top_trends[0][1]
-            top_mentions_dict = {k: v for k, v in top_trends}
+            # Ordena pelo Top 5
+            sorted_trends = sorted(counts.items(), key=lambda x: x[1], reverse=True)[:5]
+            top_winner = sorted_trends[0][0] # Ex: "AI AGENTS"
+            top_count = sorted_trends[0][1]
+            top_dict = dict(sorted_trends)
 
-            # --- FASE 5: EVIDÊNCIA ---
-            evidence = f"Menção a ${winner_symbol} detectada."
-            for comment in reversed(fresh_comments): 
-                if f"${winner_symbol}" in comment or winner_symbol in comment:
-                    if 30 < len(comment) < 400: 
-                        evidence = comment
-                        break 
+            # --- FASE 4: EXTRAÇÃO DE EVIDÊNCIA CONTEXTUAL ---
+            # Busca a melhor frase original que contém o vencedor
+            best_evidence = "Tendência identificada via análise de frequência."
+            winner_clean = top_winner.replace("$", "").lower()
+            
+            candidates = []
+            for sentence in fresh_sentences:
+                if winner_clean in sentence.lower():
+                    candidates.append(sentence)
+            
+            # Escolhe a frase de tamanho médio (geralmente a mais explicativa)
+            if candidates:
+                # Ordena por proximidade do tamanho ideal (100 caracteres)
+                candidates.sort(key=lambda s: abs(len(s) - 100))
+                best_evidence = candidates[0]
 
-            print(f"   🏆 TENDÊNCIA: ${winner_symbol} ({winner_count} menções)")
-            return top_trends, evidence, top_mentions_dict
+            print(f"   🏆 NARRATIVA DOMINANTE: {top_winner} ({top_count} ocorrências)")
+            print(f"   🗣️ CONTEXTO: \"{best_evidence[:60]}...\"")
+            
+            return sorted_trends, best_evidence, top_dict
 
         except Exception as e:
-            print(f"   ❌ Erro no Scraper: {e}")
-            return [], "Erro técnico", {}
+            print(f"   ❌ Erro Crítico no Scraper SOTA: {e}")
+            return [], f"Erro de processamento: {str(e)[:50]}", {}
+        
         finally:
-            driver.quit()
+            if driver:
+                try:
+                    driver.quit()
+                except:
+                    pass

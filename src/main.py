@@ -9,20 +9,16 @@ import numpy as np
 from datetime import datetime, timedelta
 from flask import Flask
 import threading
-import json
 
-# --- PARTE 1: O SERVIDOR FALSO (Keep-Alive) ---
+# --- SERVER KEEP-ALIVE ---
 server = Flask(__name__)
-
 @server.route('/')
-def home():
-    return "Moltbook Pulse is Alive & Scanning! 🤖"
-
+def home(): return "Moltbook Pulse SOTA is Active 🧠"
 def run_web_server():
     port = int(os.environ.get("PORT", 10000))
     server.run(host="0.0.0.0", port=port)
 
-# --- PARTE 2: O ROBÔ REAL ---
+# --- APP ---
 class MoltbookApp:
     def __init__(self):
         self.engine = MoltPulseEngine()
@@ -30,82 +26,101 @@ class MoltbookApp:
         self.hive = HiveScraper()
 
     def fetch_price(self, symbol):
-        clean_symbol = symbol.replace('$', '') + "USDT"
-        print(f"📉 CHECK: Buscando preço para {clean_symbol}...")
+        # 1. Filtro de Narrativa: Se tiver espaço (Ex: "AI AGENTS"), não é ticker.
+        if " " in symbol: 
+            return None
+            
+        # 2. Limpeza do Símbolo
+        clean_symbol = symbol.replace('$', '').upper()
         
-        urls = [
-            "https://api.binance.us/api/v3/klines", 
-            "https://api.binance.com/api/v3/klines"
-        ]
+        # Mapa de correlação (Narrativas comuns -> Tokens líderes)
+        # Isso ajuda a achar preço mesmo quando falam só o nome
+        map_sym = {
+            "BITCOIN": "BTC", "ETHEREUM": "ETH", "SOLANA": "SOL", 
+            "DOGE": "DOGE", "PEPE": "PEPE", "WIF": "WIF"
+        }
+        clean_symbol = map_sym.get(clean_symbol, clean_symbol)
         
-        for url in urls:
-            try:
-                params = {'symbol': clean_symbol, 'interval': '1m', 'limit': 60}
-                r = requests.get(url, params=params, timeout=3)
-                data = r.json()
-                if isinstance(data, dict) and ('code' in data or 'msg' in data): continue 
-                df = pd.DataFrame(data, columns=['ts', 'open', 'high', 'low', 'close', 'vol', 'ct', 'qa', 'n', 'tb', 'tqa', 'i'])
-                df['ts'] = pd.to_datetime(df['ts'], unit='ms')
-                df['close'] = df['close'].astype(float)
-                return df
-            except: continue
+        # Se o símbolo ficou muito longo (>6 chars) e não é conhecido, provável que não seja par USDT
+        if len(clean_symbol) > 8: 
+            return None
+
+        clean_symbol += "USDT"
         
-        print("   ⚠️ Gerando dados sintéticos (Geo-fence fallback).")
-        dates = [datetime.now() - timedelta(minutes=i) for i in range(60)]
-        dates.reverse()
-        prices = [100 + (i * 0.05) + np.random.normal(0, 0.2) for i in range(60)] 
-        return pd.DataFrame({'ts': dates, 'close': prices})
+        try:
+            url = "https://api.binance.com/api/v3/klines"
+            params = {'symbol': clean_symbol, 'interval': '1m', 'limit': 60}
+            r = requests.get(url, params=params, timeout=2)
+            
+            if r.status_code != 200: return None
+            
+            data = r.json()
+            # Validação extra da resposta
+            if not isinstance(data, list): return None
+            
+            df = pd.DataFrame(data, columns=['ts', 'o', 'h', 'l', 'c', 'v', 'ct', 'qa', 'n', 'tb', 'tqa', 'i'])
+            return float(df['c'].iloc[-1]), float(df['c'].iloc[-10]) # Preço atual, Preço 10min atrás
+        except: 
+            return None
 
     def run(self):
-        print(f"\n--- CICLO INICIADO: {datetime.now()} ---")
+        print(f"\n--- CICLO SOTA INICIADO: {datetime.now()} ---")
         try:
-            # 1. Mineração Profunda (Retorna Top Lista, Texto Evidência, Dicionário Top)
-            top_trends, evidence_text, top_mentions_dict = self.hive.scan_hive()
+            # Chama o novo Scraper Potente
+            top_trends, evidence, top_dict = self.hive.scan_hive()
             
-            if top_trends:
-                winner_symbol = top_trends[0][0]
-                winner_count = top_trends[0][1]
-                # Score dinâmico: base 1 + log das menções para não explodir com 1000 menções
-                pulse_score = min(1.0 + np.log2(winner_count + 1) * 1.5, 9.9)
-            else:
-                # Fallback para silêncio
-                winner_symbol = "BTC"
-                pulse_score = 1.0
-                evidence_text = "Modo de espera: Atividade social baixa."
-                top_mentions_dict = {"STATUS": "LOW_ACTIVITY"}
+            if not top_trends:
+                print("   💤 Rede em silêncio absoluto.")
+                return
 
-            print(f"🔥 ALVO FINAL: ${winner_symbol} (Score: {pulse_score:.2f})")
+            winner = top_trends[0][0] # Pode ser "$BTC" ou "AI AGENTS"
+            count = top_trends[0][1]
             
-            # 2. Busca Preço
-            df = self.fetch_price(winner_symbol)
-            price_change = (df['close'].iloc[-1] - df['close'].iloc[-10]) / df['close'].iloc[-10]
+            # Score Logarítmico (Suaviza picos absurdos de spam)
+            # 10 menções = Score 4.3 | 50 menções = Score 6.6 | 100 menções = Score 7.6
+            score = min(1.0 + np.log(count + 1) * 1.5, 9.9)
+
+            # Tenta buscar preço
+            price_data = self.fetch_price(winner)
             
-            # 3. Análise de Lag (Hype alto e preço parado)
-            is_lag = pulse_score > 6.0 and abs(price_change) < 0.003
-            
-            # 4. Salvar Riqueza no DB (A CORREÇÃO ESTÁ AQUI)
+            if price_data:
+                # É UM TICKER (Tem Preço)
+                current_price = price_data[0]
+                old_price = price_data[1]
+                pct_change = (current_price - old_price) / old_price
+                
+                # Lag: Muito Hype (Score > 6) e Preço Parado (< 0.3%)
+                is_lag = score > 6.0 and abs(pct_change) < 0.003
+                display_type = "TICKER"
+            else:
+                # É UMA NARRATIVA (Sem Preço)
+                pct_change = 0.0
+                is_lag = False # Narrativas abstratas não têm "Lag de preço" direto
+                display_type = "NARRATIVA"
+
+            print(f"🔥 {display_type}: {winner} (Score: {score:.1f})")
+            print(f"   🗣️ Evidência: \"{evidence[:50]}...\"")
+
             if self.db:
-                # Usamos o método save_signal da classe Database, que sabe lidar com a conexão
                 self.db.save_signal(
-                    symbol=f"${winner_symbol}",
-                    score=pulse_score,
-                    price_change=price_change,
+                    symbol=winner, 
+                    score=score,
+                    price_change=pct_change,
                     is_lag=is_lag,
-                    top_mentions=top_mentions_dict, # JSONB
-                    evidence_text=evidence_text     # TEXT
+                    top_mentions=top_dict,
+                    evidence_text=evidence
                 )
                 
         except Exception as e:
-            print(f"❌ ERRO NO CICLO: {e}")
+            print(f"❌ ERRO GERAL: {e}")
 
 if __name__ == "__main__":
     t = threading.Thread(target=run_web_server)
     t.daemon = True
     t.start()
-    print("🌍 FAKE SERVER INICIADO")
     
     app = MoltbookApp()
     while True:
         app.run()
-        print("🏁 CICLO CONCLUÍDO. Dormindo por 1 hora...")
+        print("🏁 Ciclo concluído. Dormindo 1h...")
         time.sleep(3600)
