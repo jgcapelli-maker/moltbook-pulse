@@ -13,8 +13,11 @@ import json
 
 # --- PARTE 1: O SERVIDOR FALSO (Keep-Alive) ---
 server = Flask(__name__)
+
 @server.route('/')
-def home(): return "Moltbook Pulse is Alive & Scanning! 🤖"
+def home():
+    return "Moltbook Pulse is Alive & Scanning! 🤖"
+
 def run_web_server():
     port = int(os.environ.get("PORT", 10000))
     server.run(host="0.0.0.0", port=port)
@@ -26,11 +29,15 @@ class MoltbookApp:
         self.db = MoltDatabase() 
         self.hive = HiveScraper()
 
-    # (Método fetch_price permanece idêntico, omitido para economizar espaço)
     def fetch_price(self, symbol):
         clean_symbol = symbol.replace('$', '') + "USDT"
         print(f"📉 CHECK: Buscando preço para {clean_symbol}...")
-        urls = ["https://api.binance.us/api/v3/klines", "https://api.binance.com/api/v3/klines"]
+        
+        urls = [
+            "https://api.binance.us/api/v3/klines", 
+            "https://api.binance.com/api/v3/klines"
+        ]
+        
         for url in urls:
             try:
                 params = {'symbol': clean_symbol, 'interval': '1m', 'limit': 60}
@@ -42,8 +49,10 @@ class MoltbookApp:
                 df['close'] = df['close'].astype(float)
                 return df
             except: continue
+        
         print("   ⚠️ Gerando dados sintéticos (Geo-fence fallback).")
-        dates = [datetime.now() - timedelta(minutes=i) for i in range(60)]; dates.reverse()
+        dates = [datetime.now() - timedelta(minutes=i) for i in range(60)]
+        dates.reverse()
         prices = [100 + (i * 0.05) + np.random.normal(0, 0.2) for i in range(60)] 
         return pd.DataFrame({'ts': dates, 'close': prices})
 
@@ -67,26 +76,24 @@ class MoltbookApp:
 
             print(f"🔥 ALVO FINAL: ${winner_symbol} (Score: {pulse_score:.2f})")
             
-            # 2. Preço
+            # 2. Busca Preço
             df = self.fetch_price(winner_symbol)
             price_change = (df['close'].iloc[-1] - df['close'].iloc[-10]) / df['close'].iloc[-10]
             
-            # 3. Lag (Hype alto e preço parado)
+            # 3. Análise de Lag (Hype alto e preço parado)
             is_lag = pulse_score > 6.0 and abs(price_change) < 0.003
             
-            # 4. Salvar Riqueza no DB
+            # 4. Salvar Riqueza no DB (A CORREÇÃO ESTÁ AQUI)
             if self.db:
-                data = {
-                    "symbol": f"${winner_symbol}",
-                    "sentiment_score": float(pulse_score),
-                    "price_change": float(price_change),
-                    "is_lag": bool(is_lag),
-                    "top_mentions": top_mentions_dict, # JSONB
-                    "evidence_text": evidence_text     # TEXT
-                }
-                # Usa o cliente raw do supabase para inserir o JSON corretamente
-                self.db.supabase.table("market_pulse").insert(data).execute()
-                print("   💾 SINAL RICO (COM EVIDÊNCIA) SALVO!")
+                # Usamos o método save_signal da classe Database, que sabe lidar com a conexão
+                self.db.save_signal(
+                    symbol=f"${winner_symbol}",
+                    score=pulse_score,
+                    price_change=price_change,
+                    is_lag=is_lag,
+                    top_mentions=top_mentions_dict, # JSONB
+                    evidence_text=evidence_text     # TEXT
+                )
                 
         except Exception as e:
             print(f"❌ ERRO NO CICLO: {e}")
